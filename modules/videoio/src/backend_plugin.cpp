@@ -373,6 +373,9 @@ std::vector<FileSystemPath_t> getPluginCandidates(const std::string& baseName)
             continue;
         std::vector<std::string> candidates;
         cv::glob(utils::fs::join(path, plugin_expr), candidates);
+        // Prefer candisates with higher versions
+        // TODO: implemented accurate versions-based comparator
+        std::sort(candidates.begin(), candidates.end(), std::greater<std::string>());
         CV_LOG_INFO(NULL, "    - " << path << ": " << candidates.size());
         copy(candidates.begin(), candidates.end(), back_inserter(results));
     }
@@ -749,6 +752,7 @@ std::string getCapturePluginVersion(
     CV_Assert(plugin_backend_factory);
     return plugin_backend_factory->getCapturePluginVersion(version_ABI, version_API);
 #else
+    CV_UNUSED(backend_factory);
     CV_UNUSED(version_ABI);
     CV_UNUSED(version_API);
     CV_Error(Error::StsBadFunc, "Plugins are not available in this build");
@@ -768,6 +772,7 @@ std::string getWriterPluginVersion(
     CV_Assert(plugin_backend_factory);
     return plugin_backend_factory->getWriterPluginVersion(version_ABI, version_API);
 #else
+    CV_UNUSED(backend_factory);
     CV_UNUSED(version_ABI);
     CV_UNUSED(version_API);
     CV_Error(Error::StsBadFunc, "Plugins are not available in this build");

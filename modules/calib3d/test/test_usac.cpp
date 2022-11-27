@@ -345,11 +345,16 @@ TEST(usac_P3P, accuracy) {
                    log(1 - pow(inl_ratio, 3 /* sample size */));
 
         for (auto flag : flags) {
+            std::vector<int> inliers;
             cv::Mat rvec, tvec, mask, R, P;
             CV_Assert(cv::solvePnPRansac(obj_pts, img_pts, K1, cv::noArray(), rvec, tvec,
-                    false, (int)max_iters, (float)thr, conf, mask, flag));
+                    false, (int)max_iters, (float)thr, conf, inliers, flag));
             cv::Rodrigues(rvec, R);
             cv::hconcat(K1 * R, K1 * tvec, P);
+            mask.create(pts_size, 1, CV_8U);
+            mask.setTo(Scalar::all(0));
+            for (auto inl : inliers)
+                mask.at<uchar>(inl) = true;
             checkInliersMask(TestSolver ::PnP, inl_size, thr, img_pts, obj_pts, P, mask);
         }
     }
@@ -416,19 +421,27 @@ TEST(usac_testUsacParams, accuracy) {
             // CV_Error(cv::Error::StsError, "Essential matrix estimation failed!");
     }
 
+    std::vector<int> inliers(pts_size);
     // P3P
     inl_size = generatePoints(rng, pts1, pts2, K1, K2, false, pts_size, TestSolver::PnP,
     getInlierRatio(usac_params.maxIterations, 3, usac_params.confidence), 0.01, gt_inliers);
-    CV_Assert(cv::solvePnPRansac(pts2, pts1, K1, dist_coeff, rvec, tvec, mask, usac_params));
+    CV_Assert(cv::solvePnPRansac(pts2, pts1, K1, dist_coeff, rvec, tvec, inliers, usac_params));
     cv::Rodrigues(rvec, R); cv::hconcat(K1 * R, K1 * tvec, model);
+    mask.create(pts_size, 1, CV_8U);
+    mask.setTo(Scalar::all(0));
+    for (auto inl : inliers)
+        mask.at<uchar>(inl) = true;
     checkInliersMask(TestSolver::PnP, inl_size, usac_params.threshold, pts1, pts2, model, mask);
 
     // P6P
     inl_size = generatePoints(rng, pts1, pts2, K1, K2, false, pts_size, TestSolver::PnP,
     getInlierRatio(usac_params.maxIterations, 6, usac_params.confidence), 0.1, gt_inliers);
     cv::Mat K_est;
-    CV_Assert(cv::solvePnPRansac(pts2, pts1, K_est, dist_coeff, rvec, tvec, mask, usac_params));
+    CV_Assert(cv::solvePnPRansac(pts2, pts1, K_est, dist_coeff, rvec, tvec, inliers, usac_params));
     cv::Rodrigues(rvec, R); cv::hconcat(K_est * R, K_est * tvec, model);
+    mask.setTo(Scalar::all(0));
+    for (auto inl : inliers)
+        mask.at<uchar>(inl) = true;
     checkInliersMask(TestSolver::PnP, inl_size, usac_params.threshold, pts1, pts2, model, mask);
 
     // Affine2D
@@ -439,5 +452,32 @@ TEST(usac_testUsacParams, accuracy) {
     checkInliersMask(TestSolver::Homogr, inl_size, usac_params.threshold, pts1, pts2, model, mask);
 }
 
+TEST(usac_solvePnPRansac, regression_21105) {
+    std::vector<int> gt_inliers;
+    const int pts_size = 100;
+    double inl_ratio = 0.1;
+    cv::Mat img_pts, obj_pts, K1, K2;
+    cv::RNG &rng = cv::theRNG();
+    generatePoints(rng, img_pts, obj_pts, K1, K2, false /*two calib*/,
+                   pts_size, TestSolver ::PnP, inl_ratio, 0.15 /*noise std*/, gt_inliers);
+    const double conf = 0.99, thr = 2., max_iters = 1.3 * log(1 - conf) /
+                log(1 - pow(inl_ratio, 3 /* sample size */));
+    const int flag = USAC_DEFAULT;
+    std::vector<int> inliers;
+    cv::Matx31d rvec, tvec;
+    CV_Assert(cv::solvePnPRansac(obj_pts, img_pts, K1, cv::noArray(), rvec, tvec,
+            false, (int)max_iters, (float)thr, conf, inliers, flag));
+
+    cv::Mat zero_column = cv::Mat::zeros(3, 1, K1.type());
+    cv::hconcat(K1, zero_column, K1);
+    cv::Mat K1_copy = K1.colRange(0, 3);
+    std::vector<int> inliers_copy;
+    cv::Matx31d rvec_copy, tvec_copy;
+    CV_Assert(cv::solvePnPRansac(obj_pts, img_pts, K1_copy, cv::noArray(), rvec_copy, tvec_copy,
+              false, (int)max_iters, (float)thr, conf, inliers_copy, flag));
+    EXPECT_EQ(rvec, rvec_copy);
+    EXPECT_EQ(tvec, tvec_copy);
+    EXPECT_EQ(inliers, inliers_copy);
+}
 
 }}  // namespace

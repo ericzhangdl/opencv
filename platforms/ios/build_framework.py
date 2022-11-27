@@ -32,9 +32,14 @@ Adding --dynamic parameter will build {framework_name}.framework as App Store dy
 """
 
 from __future__ import print_function, unicode_literals
-import glob, os, os.path, shutil, string, sys, argparse, traceback, multiprocessing
+import glob, os, os.path, shutil, string, sys, argparse, traceback, multiprocessing, codecs, io
 from subprocess import check_call, check_output, CalledProcessError
-from distutils.dir_util import copy_tree
+
+if sys.version_info >= (3, 8): # Python 3.8+
+    def copy_tree(src, dst):
+        shutil.copytree(src, dst, dirs_exist_ok=True)
+else:
+    from distutils.dir_util import copy_tree
 
 sys.path.insert(0, os.path.abspath(os.path.abspath(os.path.dirname(__file__))+'/../apple'))
 from cv_build_utils import execute, print_error, get_xcode_major, get_xcode_setting, get_xcode_version, get_cmake_version
@@ -42,7 +47,7 @@ from cv_build_utils import execute, print_error, get_xcode_major, get_xcode_sett
 IPHONEOS_DEPLOYMENT_TARGET='9.0'  # default, can be changed via command line options or environment variable
 
 class Builder:
-    def __init__(self, opencv, contrib, dynamic, bitcodedisabled, exclude, disable, enablenonfree, targets, debug, debug_info, framework_name, run_tests, build_docs):
+    def __init__(self, opencv, contrib, dynamic, bitcodedisabled, exclude, disable, enablenonfree, targets, debug, debug_info, framework_name, run_tests, build_docs, swiftdisabled):
         self.opencv = os.path.abspath(opencv)
         self.contrib = None
         if contrib:
@@ -63,6 +68,7 @@ class Builder:
         self.framework_name = framework_name
         self.run_tests = run_tests
         self.build_docs = build_docs
+        self.swiftdisabled = swiftdisabled
 
     def checkCMakeVersion(self):
         if get_xcode_version() >= (12, 2):
@@ -153,6 +159,22 @@ class Builder:
                 print("To build docs call:")
                 print(sys.argv[0].replace("build_framework", "build_docs") + " " + dirs[0] + "/modules/objc/framework_build")
             self.copy_samples(outdir)
+            if self.swiftdisabled:
+                swift_sources_dir = os.path.join(outdir, "SwiftSources")
+                if not os.path.exists(swift_sources_dir):
+                    os.makedirs(swift_sources_dir)
+                for root, dirs, files in os.walk(dirs[0]):
+                    for file in files:
+                        if file.endswith(".swift") and file.find("Test") == -1:
+                            with io.open(os.path.join(root, file), encoding="utf-8", errors="ignore") as file_in:
+                                body = file_in.read()
+                            if body.find("import Foundation") != -1:
+                                insert_pos = body.find("import Foundation") + len("import Foundation") + 1
+                                body = body[:insert_pos] + "import " + self.framework_name + "\n" + body[insert_pos:]
+                            else:
+                                body = "import " + self.framework_name + "\n\n" + body
+                            with codecs.open(os.path.join(swift_sources_dir, file), "w", "utf-8") as file_out:
+                                file_out.write(body)
 
     def build(self, outdir):
         try:
@@ -297,8 +319,8 @@ class Builder:
         execute(["cmake", "-DBUILD_TYPE=%s" % self.getConfiguration(), "-P", "cmake_install.cmake"], cwd = builddir)
         if self.build_objc_wrapper:
             cmakecmd = self.makeCMakeCmd(arch, target, builddir + "/modules/objc_bindings_generator/{}/gen".format(self.getObjcTarget(target)), cmakeargs)
-            # cmakecmd.append("-DCMAKE_Swift_FLAGS=" + "-target x86_64-apple-ios13.0-macabi")
-            # cmakecmd.append("-DCMAKE_EXE_LINKER_FLAGS=" + "-target x86_64-apple-ios13.0-macabi")
+            if self.swiftdisabled:
+                cmakecmd.append("-DSWIFT_DISABLED=1")
             cmakecmd.append("-DBUILD_ROOT=%s" % builddir)
             cmakecmd.append("-DCMAKE_INSTALL_NAME_TOOL=install_name_tool")
             cmakecmd.append("--no-warn-unused-cli")
@@ -357,6 +379,13 @@ class Builder:
                 "-framework", "CoreImage", "-framework", "CoreMedia", "-framework", "QuartzCore",
                 "-framework", "Accelerate", "-framework", "OpenCL",
             ]
+        elif target_platform == "iphoneos" or target_platform == "iphonesimulator":
+            framework_options = [
+                "-iframework", "%s/System/iOSSupport/System/Library/Frameworks" % sdk_dir,
+                "-framework", "AVFoundation", "-framework", "CoreGraphics",
+                "-framework", "CoreImage", "-framework", "CoreMedia", "-framework", "QuartzCore",
+                "-framework", "Accelerate", "-framework", "UIKit", "-framework", "CoreVideo",
+            ]
         execute([
             "clang++",
             "-Xlinker", "-rpath",
@@ -389,11 +418,11 @@ class Builder:
             for dirname, dirs, files in os.walk(os.path.join(dstdir, "Headers")):
                 for filename in files:
                     filepath = os.path.join(dirname, filename)
-                    with open(filepath) as file:
+                    with codecs.open(filepath, "r", "utf-8") as file:
                         body = file.read()
                     body = body.replace("include \"opencv2/", "include \"" + name + "/")
                     body = body.replace("include <opencv2/", "include <" + name + "/")
-                    with open(filepath, "w") as file:
+                    with codecs.open(filepath, "w", "utf-8") as file:
                         file.write(body)
         if self.build_objc_wrapper:
             copy_tree(os.path.join(builddirs[0], "install", "lib", name + ".framework", "Headers"), os.path.join(dstdir, "Headers"))
@@ -509,6 +538,7 @@ if __name__ == "__main__":
     parser.add_argument('--legacy_build', default=False, dest='legacy_build', action='store_true', help='Build legacy opencv2 framework (default: False, equivalent to "--framework_name=opencv2 --without=objc")')
     parser.add_argument('--run_tests', default=False, dest='run_tests', action='store_true', help='Run tests')
     parser.add_argument('--build_docs', default=False, dest='build_docs', action='store_true', help='Build docs')
+    parser.add_argument('--disable-swift', default=False, dest='swiftdisabled', action='store_true', help='Disable building of Swift extensions')
 
     args, unknown_args = parser.parse_known_args()
     if unknown_args:
@@ -562,6 +592,6 @@ if __name__ == "__main__":
         if iphonesimulator_archs:
             targets.append((iphonesimulator_archs, "iPhoneSimulator"))
 
-    b = iOSBuilder(args.opencv, args.contrib, args.dynamic, args.bitcodedisabled, args.without, args.disable, args.enablenonfree, targets, args.debug, args.debug_info, args.framework_name, args.run_tests, args.build_docs)
+    b = iOSBuilder(args.opencv, args.contrib, args.dynamic, args.bitcodedisabled, args.without, args.disable, args.enablenonfree, targets, args.debug, args.debug_info, args.framework_name, args.run_tests, args.build_docs, args.swiftdisabled)
 
     b.build(args.out)
